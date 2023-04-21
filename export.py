@@ -8,11 +8,12 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
 
-from image_batch import ImageBatcher
+from image_batch import ImageBatcher, ImageBatcherType
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("EngineBuilder").setLevel(logging.INFO)
 log = logging.getLogger("EngineBuilder")
+
 
 class EngineCalibrator(trt.IInt8EntropyCalibrator2):
     """
@@ -113,7 +114,7 @@ class EngineBuilder:
         self.network = None
         self.parser = None
 
-    def create_network(self, onnx_path, end2end, conf_thres, iou_thres, max_det, **kwargs):
+    def create_network(self, onnx_path, end2end, conf_thres, iou_thres, max_det, batch_size, possible_inputs, **kwargs):
         """
         Parse the ONNX graph and create the corresponding TensorRT network definition.
         :param onnx_path: The path to the ONNX graph to load.
@@ -141,7 +142,27 @@ class EngineBuilder:
             print("Input '{}' with shape {} and dtype {}".format(input.name, input.shape, input.dtype))
         for output in outputs:
             print("Output '{}' with shape {} and dtype {}".format(output.name, output.shape, output.dtype))
-        assert self.batch_size > 0
+            
+        if batch_size is not None or possible_inputs is not None:
+            wandh0 = wandh1 = wandh2 = self.network.get_input(0).shape[-2:]
+            
+            if possible_inputs is not None:
+                wandh0 = possible_inputs[0]
+                wandh1 = possible_inputs[1]
+                wandh2 = possible_inputs[2]
+            
+            name = self.network.get_input(0).name
+            profile = self.builder.create_optimization_profile()
+            print(f'\ndynamic batch profile is\n\
+                {(batch_size[0], 3, *wandh0)}\n\
+                {(batch_size[1], 3, *wandh1)}\n\
+                {(batch_size[2], 3, *wandh2)}'
+            )
+            profile.set_shape(name, (batch_size[0], 3, *wandh0),
+                              (batch_size[1], 3, *wandh1),
+                              (batch_size[2], 3, *wandh2))
+            self.config.add_optimization_profile(profile)
+        
         # self.builder.max_batch_size = self.batch_size  # This no effect for networks created with explicit batch dimension mode. Also DEPRECATED.
 
         if end2end:
@@ -216,7 +237,7 @@ class EngineBuilder:
 
 
     def create_engine(self, engine_path, precision, calib_input=None, calib_cache=None, calib_num_images=5000,
-                      calib_batch_size=8):
+                      calib_batch_size=8, calib_preprocessor=ImageBatcherType.LETTERBOX_YOLO, possible_inputs=None):
         """
         Build the TensorRT engine and serialize it to disk.
         :param engine_path: The path where to serialize the engine to.
@@ -252,10 +273,22 @@ class EngineBuilder:
                 self.config.int8_calibrator = EngineCalibrator(calib_cache)
                 if not os.path.exists(calib_cache):
                     calib_shape = [calib_batch_size] + list(inputs[0].shape[1:])
+                    if -1 in list(inputs[0].shape[1:]):
+                        raise NotImplementedError('TensorRT will be not successfully created with such input data for now.')
+                        if possible_inputs is None:
+                            raise Exception('Model have dynamic input, but possible inputs do not provided')
+                        if calib_shape[1] == 3:
+                            self.format = "NCHW"
+                            calib_shape[2] = possible_inputs[1][0]
+                            calib_shape[3] = possible_inputs[1][1]
+                        elif calib_shape[3] == 3:
+                            self.format = "NHWC"
+                            calib_shape[1] = possible_inputs[1][0]
+                            calib_shape[2] = possible_inputs[1][1]
                     calib_dtype = trt.nptype(inputs[0].dtype)
                     self.config.int8_calibrator.set_image_batcher(
                         ImageBatcher(calib_input, calib_shape, calib_dtype, max_num_images=calib_num_images,
-                                     exact_batches=True))
+                                     exact_batches=True, preprocessor=calib_preprocessor))
 
         # with self.builder.build_engine(self.network, self.config) as engine, open(engine_path, "wb") as f:
         with self.builder.build_serialized_network(self.network, self.config) as engine, open(engine_path, "wb") as f:
@@ -264,9 +297,9 @@ class EngineBuilder:
 
 def main(args):
     builder = EngineBuilder(args.verbose, args.workspace)
-    builder.create_network(args.onnx, args.end2end, args.conf_thres, args.iou_thres, args.max_det, v8=args.v8)
+    builder.create_network(args.onnx, args.end2end, args.conf_thres, args.iou_thres, args.max_det, v8=args.v8, batch_size=args.batch_size, possible_inputs=args.possible_inputs)
     builder.create_engine(args.engine, args.precision, args.calib_input, args.calib_cache, args.calib_num_images,
-                          args.calib_batch_size)
+                          args.calib_batch_size, args.calib_preprocessor, args.possible_inputs)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -284,6 +317,12 @@ if __name__ == "__main__":
                         help="The maximum number of images to use for calibration, default: 5000")
     parser.add_argument("--calib_batch_size", default=8, type=int,
                         help="The batch size for the calibration process, default: 8")
+    parser.add_argument('--calib_preprocessor',
+                        default=ImageBatcherType.LETTERBOX_YOLO,
+                        type=str,
+                        help='Preprocess type for calibration (int8). Supported types are: '
+                            f'{ImageBatcherType.ONLY_NORMALIZE}, {ImageBatcherType.FIXED_SHAPE_RESIZER}, '
+                            f'{ImageBatcherType.KEEP_ASPECT_RATIO_RESIZER}, {ImageBatcherType.LETTERBOX_YOLO}.')
     parser.add_argument("--end2end", default=False, action="store_true",
                         help="export the engine include nms plugin, default: False")
     parser.add_argument("--conf_thres", default=0.4, type=float,
@@ -294,8 +333,47 @@ if __name__ == "__main__":
                         help="The total num for results, default: 100")
     parser.add_argument("--v8", default=False, action="store_true",
                         help="use yolov8 model, default: False")
+    parser.add_argument('--batch-size',
+                        nargs='+',
+                        type=int,
+                        default=None, #
+                        help='Sequence of batch sized for tensorrt engine. Example: 1 2 3, '
+                             'in this sequence maximum/between/minimum will be taken as corrisponding for TensorRT (max/mid/min). '
+                             'Also single value is possible, aka: 4, means that batch-size will be freezed for this value')
+    parser.add_argument('--possible-inputs',
+                        nargs='+',
+                        type=int,
+                        default=None, #
+                        help='Sequence of image sizes for tensorrt engine. Example: 320 480 640, '
+                             'in this sequence input will be square (!) and maximum/between/minimum will be taken as corrisponding for TensorRT (max/mid/min). '
+                             'Also single value is possible, aka: 640, means that input size will be freezed for this value. '
+                             'Example with rectangular input: 320 340 480 500 640 700, where each two values are corrisponding Height and Width of the input, '
+                             'also notice that for this example order is metter (order: minimum, mid, maximum)')
     args = parser.parse_args()
     print(args)
+    if args.batch_size is not None and isinstance(args.batch_size, list) and len(args.batch_size) > 0:
+        args.batch_size = args.batch_size if len(
+            args.batch_size) == 3 else args.batch_size[-1:] * 3
+        args.batch_size.sort()
+        
+    if args.possible_inputs is not None and isinstance(args.possible_inputs, list) and len(args.possible_inputs) > 0:
+        if len(args.possible_inputs) == 1:
+            args.possible_inputs = [[args.possible_inputs[-1:], args.possible_inputs[-1:]]] * 3
+        elif len(args.possible_inputs) == 2:
+            args.possible_inputs = [args.possible_inputs[-2:]] * 3
+        elif len(args.possible_inputs) == 3:
+            args.possible_inputs = [ 
+                [single_possible_inputs, single_possible_inputs] 
+                for single_possible_inputs in args.possible_inputs
+            ]
+        elif len(args.possible_inputs) == 6:
+            args.possible_inputs = list(map(list, 
+                zip(args.possible_inputs[::2], args.possible_inputs[1::2])
+            ))
+        else:
+            raise Exception(f"Uknown size of possible inputs ({len(args.possible_inputs)}) = {args.possible_inputs}")
+        # TODO: Check order min/opt/max
+        
     if not all([args.onnx, args.engine]):
         parser.print_help()
         log.error("These arguments are required: --onnx and --engine")
@@ -306,5 +384,4 @@ if __name__ == "__main__":
         sys.exit(1)
     
     main(args)
-
 
