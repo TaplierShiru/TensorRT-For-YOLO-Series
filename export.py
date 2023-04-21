@@ -15,16 +15,6 @@ logging.getLogger("EngineBuilder").setLevel(logging.INFO)
 log = logging.getLogger("EngineBuilder")
 
 
-# Good example for TensorFlow:
-#  https://docs.nvidia.com/deeplearning/frameworks/tf-trt-user-guide/index.html#static-dynamic-mode
-# COuld take some tips from there
-
-# Another repo about 'How to map yolov7 to TensorRT':
-#  https://github.com/triple-Mu/YOLO-TensorRT8
-# From this repo were taken dynamic batch-size code and thanks to it were added code for dynamic img
-# Additional links about dynamic shapes for TensorRT:
-#  https://forums.developer.nvidia.com/t/tensorrt-use-dynamic-batch-or-specified-batch/232835
-
 class EngineCalibrator(trt.IInt8EntropyCalibrator2):
     """
     Implements the INT8 Entropy Calibrator 2.
@@ -117,7 +107,7 @@ class EngineBuilder:
 
         self.builder = trt.Builder(self.trt_logger)
         self.config = self.builder.create_builder_config()
-        # self.config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace * (2 ** 30))
+        self.config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace * (2 ** 30))
         # self.config.max_workspace_size = workspace * (2 ** 30)  # Deprecation
 
         self.batch_size = None
