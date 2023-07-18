@@ -1,6 +1,14 @@
 # YOLO Series TensorRT Python/C++ 
 ## [简体中文](README_CN.md)
 
+## Main changes in this forked repo
+The main reason to create separate forked repo is to add support of dynamic batch size and image size, but there is problem with all YOLOs models because of that.
+Each model should support this kind of pipeline, for now I only implemented such behaviour **only** with YOLOv7.
+
+More about "how" create proper model of ONNX you should refer to [this repo](https://github.com/TaplierShiru/yolov7) and to
+this [paragraph "Pytorch to TensorRT with NMS (and inference)"](https://github.com/TaplierShiru/yolov7#export). Here you could see different commands how to transfer original PyTorch model to trt.
+
+
 ## Support
 [YOLOv8](https://v8docs.ultralytics.com/)、[YOLOv7](https://github.com/WongKinYiu/yolov7)、[YOLOv6](https://github.com/meituan/YOLOv6)、 [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX)、 [YOLOV5](https://github.com/ultralytics/yolov5)、[YOLOv3](https://github.com/ultralytics/yolov3)
 
